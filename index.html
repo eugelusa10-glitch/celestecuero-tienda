@@ -97,6 +97,9 @@ body{font-family:'Josefin Sans',sans-serif;font-weight:300;background:var(--crem
 .s-btn-order{background:none;border:1px solid var(--cuero);color:var(--cuero);padding:.6rem 1.2rem;font-family:'Josefin Sans',sans-serif;font-size:.6rem;letter-spacing:.22em;text-transform:uppercase;cursor:pointer;transition:all .3s;}
 .s-btn-order:hover{background:var(--cuero);color:var(--crema);}
 .s-empty-store{text-align:center;padding:5rem;color:var(--gris);grid-column:1/-1;}
+.s-loading-wrap{grid-column:1/-1;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:6rem 2rem;gap:1.2rem;}
+.s-loading-sp{width:34px;height:34px;border:3px solid rgba(139,94,60,.15);border-top-color:var(--cuero);border-radius:50%;animation:spin .8s linear infinite;}
+.s-loading-wrap p{font-size:.68rem;letter-spacing:.18em;text-transform:uppercase;color:var(--cuero-l);}
 .s-empty-store h3{font-family:'Cormorant Garamond',serif;font-size:2rem;color:var(--cuero-d);margin-bottom:.8rem;font-weight:300;}
 
 /* BANNER */
@@ -298,6 +301,7 @@ body{font-family:'Josefin Sans',sans-serif;font-weight:300;background:var(--crem
 /* Grid de previews de imágenes múltiples */
 .multi-img-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(100px,1fr));gap:.6rem;margin-top:.8rem;}
 .multi-img-item{position:relative;aspect-ratio:1;overflow:hidden;border:2px solid transparent;transition:border-color .2s;}
+.multi-img-uploading{width:100%;height:100%;display:flex;align-items:center;justify-content:center;background:var(--bg);border:1px dashed rgba(139,94,60,.3);}
 .multi-img-item.is-main{border-color:var(--cuero-l);}
 .multi-img-item img{width:100%;height:100%;object-fit:cover;display:block;}
 .multi-img-rm{position:absolute;top:.3rem;right:.3rem;background:rgba(30,22,18,.75);color:white;border:none;width:22px;height:22px;border-radius:50%;cursor:pointer;font-size:.8rem;display:flex;align-items:center;justify-content:center;transition:background .2s;}
@@ -466,7 +470,12 @@ body{font-family:'Josefin Sans',sans-serif;font-weight:300;background:var(--crem
       <div class="s-sec-label" style="justify-content:center;">Nuestra colección</div>
       <h2>Piezas hechas para <em>durar</em></h2>
     </div>
-    <div class="s-products-grid" id="storeGrid"></div>
+    <div class="s-products-grid" id="storeGrid">
+      <div class="s-loading-wrap">
+        <div class="s-loading-sp"></div>
+        <p>Cargando productos...</p>
+      </div>
+    </div>
   </section>
 
   <section class="s-banner">
@@ -762,6 +771,20 @@ async function sbDelete(id){
     method:'DELETE',headers:SB_HEADERS
   });
   if(!res.ok)throw new Error('Delete failed: '+res.status);
+}
+
+async function sbDeleteImages(urls){
+  const paths=(urls||[])
+    .filter(u=>typeof u==='string'&&u.includes('/storage/v1/object/public/productos/'))
+    .map(u=>u.split('/storage/v1/object/public/productos/')[1])
+    .filter(Boolean);
+  if(!paths.length)return;
+  try{
+    await fetch(`${SUPABASE_URL}/storage/v1/object/productos`,{
+      method:'DELETE',headers:SB_HEADERS,
+      body:JSON.stringify({prefixes:paths})
+    });
+  }catch(e){/* no bloqueante: si falla la limpieza de archivos, no afecta al borrado del producto */}
 }
 
 function today(){return new Date().toLocaleDateString('es-AR');}
@@ -1264,6 +1287,7 @@ async function aSave(){
   const nombre=document.getElementById('aNombre').value.trim();
   const desc=document.getElementById('aDesc').value.trim();
   if(!nombre||!desc){toast('Completá el nombre y la descripción','err');return;}
+  if(curImgs.some(s=>s.startsWith('__uploading_'))){toast('Esperá a que terminen de subir las fotos','err');return;}
   const d={nombre,descripcion:desc,categoria:document.getElementById('aCat').value,precio:document.getElementById('aPrecio').value.trim(),etiqueta:document.getElementById('aEtiq').value,estado:document.getElementById('aEstado').value,imagenes:[...curImgs],creado:today()};
   const eid=document.getElementById('aEditId').value;
   const btn=document.getElementById('aSaveBtn');
@@ -1293,7 +1317,9 @@ function aCancel(){aReset();aShow('productos');}
 function aAskDel(id,n){deleteId=id;document.getElementById('confirmTxt').textContent=`¿Seguro querés eliminar "${n}"?`;document.getElementById('confirmOv').classList.add('show');}
 async function aDoDelete(){
   try{
+    const p=products.find(x=>x.id===deleteId);
     await sbDelete(deleteId);
+    if(p)sbDeleteImages(getImgs(p)); // limpieza de fotos en segundo plano, no bloquea la UI
     products=products.filter(p=>p.id!==deleteId);
     document.getElementById('confirmOv').classList.remove('show');
     renderAdmin();renderStore();toast('Producto eliminado');
@@ -1304,24 +1330,42 @@ async function aDoDelete(){
 }
 
 // ── MANEJO DE IMÁGENES MÚLTIPLES ──
-function aHandleImgs(e){
+async function aHandleImgs(e){
   const files=Array.from(e.target.files);
   const remaining=5-curImgs.length;
-  if(remaining<=0){toast('Máximo 5 imágenes por producto','err');return;}
+  if(remaining<=0){toast('Máximo 5 imágenes por producto','err');e.target.value='';return;}
   const toLoad=files.slice(0,remaining);
-  let loaded=0;
-  toLoad.forEach(f=>{
-    if(f.size>5*1024*1024){toast(`"${f.name}" es muy grande (máx. 5MB)`,'err');return;}
-    const r=new FileReader();
-    r.onload=ev=>{
-      curImgs.push(ev.target.result);
-      loaded++;
-      if(loaded===toLoad.length)aRenderImgGrid();
-    };
-    r.readAsDataURL(f);
-  });
-  // reset input para poder volver a seleccionar el mismo archivo
   e.target.value='';
+
+  for(const f of toLoad){
+    if(f.size>5*1024*1024){toast(`"${f.name}" es muy grande (máx. 5MB)`,'err');continue;}
+    // Placeholder temporal mientras sube, así el usuario ve algo de inmediato
+    const tempId='__uploading_'+Date.now()+Math.random().toString(36).slice(2);
+    curImgs.push(tempId);
+    aRenderImgGrid();
+    try{
+      const url=await sbUploadImage(f);
+      const idx=curImgs.indexOf(tempId);
+      if(idx!==-1)curImgs[idx]=url;
+    }catch(err){
+      const idx=curImgs.indexOf(tempId);
+      if(idx!==-1)curImgs.splice(idx,1);
+      toast(`No se pudo subir "${f.name}". Intentá de nuevo.`,'err');
+    }
+    aRenderImgGrid();
+  }
+}
+
+async function sbUploadImage(file){
+  const ext=(file.name.split('.').pop()||'jpg').toLowerCase().replace(/[^a-z0-9]/g,'')||'jpg';
+  const path=`${Date.now()}_${Math.random().toString(36).slice(2)}.${ext}`;
+  const res=await fetch(`${SUPABASE_URL}/storage/v1/object/productos/${path}`,{
+    method:'POST',
+    headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Content-Type':file.type||'application/octet-stream'},
+    body:file
+  });
+  if(!res.ok)throw new Error('Upload failed: '+res.status);
+  return `${SUPABASE_URL}/storage/v1/object/public/productos/${path}`;
 }
 
 function aRmImg(idx){
@@ -1344,18 +1388,24 @@ function aRenderImgGrid(){
   const addBtn=document.getElementById('aAddImgBtn');
   curImgs.forEach((src,i)=>{
     const item=document.createElement('div');
+    const isUploading=src.startsWith('__uploading_');
     item.className='multi-img-item'+(i===0?' is-main':'');
-    item.innerHTML=`<img src="${src}" alt="">
-      <button class="multi-img-rm" onclick="aRmImg(${i})" title="Eliminar">×</button>
-      ${i===0?`<div class="multi-img-main-tag">Principal</div>`:`<button class="multi-img-set-main" onclick="aSetMain(${i})" title="Hacer principal">★</button>`}
-    `;
+    if(isUploading){
+      item.innerHTML=`<div class="multi-img-uploading"><div class="loading-sp" style="width:22px;height:22px;"></div></div>`;
+    }else{
+      item.innerHTML=`<img src="${src}" alt="">
+        <button class="multi-img-rm" onclick="aRmImg(${i})" title="Eliminar">×</button>
+        ${i===0?`<div class="multi-img-main-tag">Principal</div>`:`<button class="multi-img-set-main" onclick="aSetMain(${i})" title="Hacer principal">★</button>`}
+      `;
+    }
     grid.insertBefore(item,addBtn);
   });
   // Mostrar/ocultar botón agregar
   addBtn.style.display=curImgs.length>=5?'none':'flex';
   // Badge contador
   const badge=document.getElementById('aImgCount');
-  badge.textContent=curImgs.length?`${curImgs.length}/5 foto${curImgs.length>1?'s':''} · La primera es la imagen principal`:'';
+  const uploadingCount=curImgs.filter(s=>s.startsWith('__uploading_')).length;
+  badge.textContent=curImgs.length?`${curImgs.length}/5 foto${curImgs.length>1?'s':''}${uploadingCount?' · subiendo...':''} · La primera es la imagen principal`:'';
 }
 
 // ── IA ──
@@ -1390,3 +1440,4 @@ init();
 </script>
 </body>
 </html>
+
